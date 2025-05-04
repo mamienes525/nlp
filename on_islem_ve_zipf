@@ -1,0 +1,101 @@
+import os
+import re
+import json
+import pandas as pd
+import numpy as np
+import nltk
+from sklearn.feature_extraction.text import TfidfVectorizer
+from nltk.tokenize import RegexpTokenizer
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer, PorterStemmer
+import matplotlib.pyplot as plt
+from collections import Counter
+
+# 🔧 Ön işleme fonksiyonu
+def preprocess_text(text, method="lemmatize"):
+    text = text.lower()
+    text = re.sub(r'\s+', ' ', text)
+    tokenizer = RegexpTokenizer(r'\w+')
+    tokens = tokenizer.tokenize(text)
+
+    stop_words = set(stopwords.words("english"))
+    tokens = [t for t in tokens if t not in stop_words]
+
+    if method == "lemmatize":
+        lemmatizer = WordNetLemmatizer()
+        tokens = [lemmatizer.lemmatize(t) for t in tokens]
+    elif method == "stem":
+        stemmer = PorterStemmer()
+        tokens = [stemmer.stem(t) for t in tokens]
+    else:
+        raise ValueError("Method must be 'lemmatize' or 'stem'")
+
+    return " ".join(tokens)
+
+# 📊 Zipf eğrisi çizimi
+def plot_zipf_curve(csv_path, text_column, title):
+    df = pd.read_csv(csv_path)
+    words = " ".join(df[text_column].astype(str)).split()
+    word_freq = Counter(words)
+    sorted_freqs = sorted(word_freq.values(), reverse=True)
+
+    plt.figure()
+    plt.plot(range(1, len(sorted_freqs)+1), sorted_freqs)
+    plt.xscale('log')
+    plt.yscale('log')
+    plt.xlabel('Rank (log)')
+    plt.ylabel('Frequency (log)')
+    plt.title(f"Zipf Plot - {title}")
+    plt.grid(True)
+    plt.show(block=False)
+
+# ✅ Ön işleme ve CSV oluşturma kontrolü
+def check_and_preprocess_data():
+    lemma_csv = "lemmatized_data.csv"
+    stem_csv = "stemmed_data.csv"
+
+    if os.path.exists(lemma_csv) and os.path.exists(stem_csv):
+        print("✅ CSV dosyaları zaten mevcut. Ön işleme atlanıyor.")
+    else:
+        print("⏳ CSV dosyaları yok. Veri işleniyor...")
+
+        input_path = "gutenberg_parsed_v1.json"
+        with open(input_path, "r", encoding="utf-8") as f:
+            books = json.load(f)
+
+        rows = []
+        for book in books:
+            for chapter in book["chapters"]:
+                rows.append({
+                    "book_title": book["book_title"],
+                    "chapter_title": chapter["title"],
+                    "chapter_text": chapter["text"]
+                })
+
+        df = pd.DataFrame(rows)
+
+        print("🔁 Lemmatization başlıyor...")
+        df["text_lemmatized"] = df["chapter_text"].apply(lambda x: preprocess_text(x, method="lemmatize"))
+        print("✅ Lemmatization tamamlandı.")
+
+        print("🔁 Stemming başlıyor...")
+        df["text_stemmed"] = df["chapter_text"].apply(lambda x: preprocess_text(x, method="stem"))
+        print("✅ Stemming tamamlandı.")
+
+        df[["book_title", "chapter_title", "text_lemmatized"]].to_csv(lemma_csv, index=False)
+        df[["book_title", "chapter_title", "text_stemmed"]].to_csv(stem_csv, index=False)
+
+        print(f"📁 Kaydedildi: {lemma_csv} ve {stem_csv}")
+
+    # 💡 Zipf grafiklerini her durumda çiz
+    print("📈 Zipf grafik çizimi başlatılıyor...")
+    plot_zipf_curve(lemma_csv, "text_lemmatized", "Lemmatized Text")
+    plot_zipf_curve(stem_csv, "text_stemmed", "Stemmed Text")
+    plt.show()
+
+# 🚀 Ana giriş noktası
+def main():
+    check_and_preprocess_data()
+
+if __name__ == "__main__":
+    main()

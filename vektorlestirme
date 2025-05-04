@@ -1,0 +1,110 @@
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from gensim.models import Word2Vec
+from gensim.models.word2vec import PathLineSentences
+import os
+
+#word2vec dosyaları var mı
+def all_models_exist(dataset_name, parameter_sets, model_dir="models"):
+    return all(
+        os.path.exists(
+            os.path.join(model_dir, f"word2vec_{dataset_name}_{params['model_type']}_win{params['window']}_dim{params['vector_size']}.model")
+        )
+        for params in parameter_sets
+    )
+#tfidf dosyaları var mı 
+def tfidf_csv_exists(output_csv):
+    return os.path.exists(output_csv)
+
+
+def compute_tfidf(input_csv, text_column, output_csv):
+    if tfidf_csv_exists(output_csv):
+        print(f"✅ {output_csv} zaten mevcut. Hesaplama atlandı.")
+        return
+
+    print(f"🔁 TF-IDF hesaplanıyor: {input_csv}")
+    
+    df = pd.read_csv(input_csv)
+    texts = df[text_column].astype(str).tolist()
+    
+    vectorizer = TfidfVectorizer()
+    tfidf_matrix = vectorizer.fit_transform(texts)
+    
+    tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=vectorizer.get_feature_names_out())
+
+    # Kitap ve bölüm bilgilerini de ekle (görsel takip için)
+    tfidf_df.insert(0, "chapter_title", df["chapter_title"])
+    tfidf_df.insert(0, "book_title", df["book_title"])
+
+    tfidf_df.to_csv(output_csv, index=False)
+    print(f"✅ Kaydedildi: {output_csv}")
+
+def train_word2vec_models(csv_path, column, dataset_name):
+    df = pd.read_csv(csv_path)
+    sentences = df[column].dropna().apply(lambda x: x.split()).tolist()
+
+    parameter_sets = [
+        {'model_type': 'cbow', 'window': 2, 'vector_size': 100},
+        {'model_type': 'skipgram', 'window': 2, 'vector_size': 100},
+        {'model_type': 'cbow', 'window': 4, 'vector_size': 100},
+        {'model_type': 'skipgram', 'window': 4, 'vector_size': 100},
+        {'model_type': 'cbow', 'window': 2, 'vector_size': 300},
+        {'model_type': 'skipgram', 'window': 2, 'vector_size': 300},
+        {'model_type': 'cbow', 'window': 4, 'vector_size': 300},
+        {'model_type': 'skipgram', 'window': 4, 'vector_size': 300},
+    ]
+
+    os.makedirs("models", exist_ok=True)
+
+    # ⏹️ Kontrol fonksiyonu çağrılıyor
+    if all_models_exist(dataset_name, parameter_sets):
+        print(f"✅ Tüm {dataset_name} modelleri zaten mevcut. Eğitim atlanıyor.")
+        return
+
+    for params in parameter_sets:
+        model_filename = f"models/word2vec_{dataset_name}_{params['model_type']}_win{params['window']}_dim{params['vector_size']}.model"
+        if os.path.exists(model_filename):
+            print(f"⏩ {model_filename} zaten var, atlandı.")
+            continue
+
+        sg = 0 if params['model_type'] == 'cbow' else 1
+        model = Word2Vec(
+            sentences,
+            vector_size=params['vector_size'],
+            window=params['window'],
+            sg=sg,
+            min_count=2,
+            workers=4,
+            epochs=10
+        )
+        model.save(model_filename)
+        print(f"✅ Model kaydedildi: {model_filename}")
+       
+
+
+# Ana çalıştırıcı
+def main():
+    #TF-IDF
+    compute_tfidf("lemmatized_data.csv", "text_lemmatized", "tfidf_lemmatized.csv")
+    compute_tfidf("stemmed_data.csv", "text_stemmed", "tfidf_stemmed.csv")
+    # Word2Vec
+    train_word2vec_models("lemmatized_data.csv", "text_lemmatized", "lemmatized")
+    train_word2vec_models("stemmed_data.csv", "text_stemmed", "stemmed")
+
+    # Eğitimden sonra tüm modellerde "time" kelimesini test et
+    print("\n🔎 Eğitilen modellerde 'time' kelimesi için benzer kelimeler aranıyor...")
+    model_dir = "models"
+    for model_file in sorted(os.listdir(model_dir)):
+        if model_file.endswith(".model"):
+            model_path = os.path.join(model_dir, model_file)
+            model = Word2Vec.load(model_path)
+            print(f"\n📂 {model_file}")
+            if "time" in model.wv:
+                similar = model.wv.most_similar("time", topn=5)
+                for word, score in similar:
+                    print(f"  {word:<15} → {score:.4f}")
+            else:
+                print("  ⚠️ 'time' kelimesi bu modelde bulunamadı.")
+
+if __name__ == "__main__":
+    main()

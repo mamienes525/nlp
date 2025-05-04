@@ -1,0 +1,285 @@
+import os
+import re
+import requests
+import json
+from collections import defaultdict
+
+'''
+otomatik olarak siteden verileri indirmeyi denedim ancak
+başarisiz olunca kendim manuel olarak indirdim 
+
+import os
+import requests
+
+DOWNLOAD_FOLDER = "gutenberg_top20"
+BOOK_IDS = [
+    84, 2701, 1342, 2542, 64317,
+    1513, 11, 844, 43, 174,
+    2641, 100, 37106, 145, 2554,
+    26184, 345, 98, 16389, 5200
+]
+
+os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+
+VARIANTS = ["-0.txt", "-8.txt", "-4.txt", ".txt", "-0.zip"]
+
+def download_book(book_id, index):
+    for variant in VARIANTS:
+        file_url = f"https://www.gutenberg.org/files/{book_id}/{book_id}{variant}"
+        try:
+            response = requests.get(file_url)
+            if response.status_code == 200:
+                # Zip dosyasını es geçiyoruz
+                if variant.endswith(".zip"):
+                    print(f"[{index}] ⚠ Found zip for {book_id}, skipping zip.")
+                    continue
+                if "Project Gutenberg" not in response.text[:500]:
+                    continue
+                path = os.path.join(DOWNLOAD_FOLDER, f"book_{index}_{book_id}.txt")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(response.text)
+                print(f"[{index}] ✔ Downloaded book {book_id} as {variant}")
+                return
+        except Exception as e:
+            continue
+    print(f"[{index}] ✖ Failed to download book {book_id}")
+
+# Başlat
+for i, book_id in enumerate(BOOK_IDS, start=1):
+    download_book(book_id, i)
+'''
+
+# JSON dosyası daha önce oluşturulmuş mu kontrol eder
+def check_and_parse_books(cleaned_dir, output_json_path):
+    if os.path.exists(output_json_path):
+        print(f"📁 JSON dosyası zaten mevcut: {output_json_path} — işlemi atlıyorum.")
+    else:
+        print("📦 JSON dosyası bulunamadı, kitaplar işleniyor...")
+        parse_books(cleaned_dir, output_json_path)
+
+#indirilen dosyaların txt lerden isimlerini otomatik olarak isimlendiren algoritma
+# 1. Dosya adlarını ilk satırdaki başlığa göre yeniden adlandırır
+def rename_books(books_dir):
+    renamed_books = {}
+    error_books = []
+
+    for original_name in os.listdir(books_dir):
+        if not re.match(r'pg\d+\.txt$', original_name):
+            continue
+
+        original_path = os.path.join(books_dir, original_name)
+        try:
+            with open(original_path, 'r', encoding='utf-8') as f:
+                first_line = f.readline().strip()
+
+            match = re.search(r'Project Gutenberg eBook of (.+?)(?:\.|$)', first_line, re.IGNORECASE)
+            if match:
+                raw_title = match.group(1)
+                clean_title = re.sub(r'[\\/*?:"<>|]', "", raw_title).strip().replace(" ", "_")
+                new_name = clean_title + ".txt"
+                new_path = os.path.join(books_dir, new_name)
+                os.rename(original_path, new_path)
+                renamed_books[original_name] = new_name
+            else:
+                error_books.append((original_name, first_line))
+        except Exception as e:
+            error_books.append((original_name, str(e)))
+
+    return renamed_books, error_books
+
+# 2. Gutenberg kapanış metinlerini temizler
+def clean_books(books_dir, cleaned_dir):
+    os.makedirs(cleaned_dir, exist_ok=True)
+
+    end_markers = [
+        r"\*\*\*\s*END OF THE PROJECT GUTENBERG EBOOK.*",
+        r"START: FULL LICENSE",
+        r"THE FULL PROJECT GUTENBERG LICENSE",
+        r"UPDATED EDITIONS WILL REPLACE THE PREVIOUS ONE",
+        r"YOU MAY USE THIS EBOOK FOR NEARLY ANY PURPOSE",
+        r"PROJECT GUTENBERG™ ELECTRONIC WORKS",
+        r"REDISTRIBUTION IS SUBJECT TO THE TRADEMARK LICENSE"
+    ]
+    compiled_end_patterns = [re.compile(marker, re.IGNORECASE) for marker in end_markers]
+
+    for fname in os.listdir(books_dir):
+        in_path = os.path.join(books_dir, fname)
+        out_path = os.path.join(cleaned_dir, fname)
+
+        with open(in_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        cleaned_lines = []
+        for line in lines:
+            if any(pat.search(line) for pat in compiled_end_patterns):
+                break
+            cleaned_lines.append(line.rstrip())
+
+        with open(out_path, 'w', encoding='utf-8') as out_f:
+            out_f.write("\n".join(cleaned_lines).strip())
+
+# 3. Başlıktan bölüm numarası çıkarır
+def extract_chapter_number(title):
+    match = re.match(r'(CHAPTER|CHAP\.|Chapter)\s+([IVXLCDM\d]+)', title, re.IGNORECASE)
+    return match.group(2) if match else title.strip()
+
+# 4. Sahte başlıkları belirler
+def is_fake_chapter(title, text):
+    suspicious_titles = [
+        "ILLUSTRATIONS", "NOTICE", "EXPLANATORY", "THE AUTHOR", "THE ROYAL NONESUCH",
+        "BY ORDER OF", "PER G. G.", "UNKNOWN FRIEND", "AT THE COURT HOUSE",
+        "DAVID GARRICK", "EDMUND KEAN", "LADIES AND CHILDREN NOT ADMITTED"
+    ]
+    title_clean = title.upper().strip()
+
+    if not text.strip():
+        return True
+    if any(s in title_clean for s in suspicious_titles):
+        return True
+    if len(text.strip()) < 200 and title_clean.isupper():
+        return True
+    return False
+
+# 5. Aynı başlık tekrarlarından yalnızca en uzun olanı saklar
+def filter_chapter_variants(parsed_books):
+    cleaned_books = []
+
+    for book in parsed_books:
+        chapter_map = defaultdict(list)
+
+        for chapter in book["chapters"]:
+            if is_fake_chapter(chapter["title"], chapter["text"]):
+                continue
+            chap_num = extract_chapter_number(chapter["title"])
+            chapter_map[chap_num].append((len(chapter["text"].strip()), chapter))
+
+        final_chapters = []
+        for chap_num, variants in chapter_map.items():
+            variants.sort(key=lambda x: x[0], reverse=True)
+            final_chapters.append(variants[0][1])
+
+        book["chapters"] = final_chapters
+        cleaned_books.append(book)
+
+    return cleaned_books
+
+# 6. Kitapları ayrıştırır, filtreler, chapter listesi oluşturur
+# Yardımcı: Roma rakamlarını tam sayıya çevirir
+def roman_to_int(roman):
+    roman_map = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
+    result, prev = 0, 0
+    for c in reversed(roman.upper()):
+        value = roman_map.get(c, 0)
+        if value < prev:
+            result -= value
+        else:
+            result += value
+            prev = value
+    return result
+
+# Temizlenmiş dosyalardan kitap + bölümleri ayrıştırır
+def parse_books(cleaned_dir, output_json_path):
+    chapter_header_patterns = [
+        r'^\s*CHAPTER\s+[IVXLCDM\d]+',
+        r'^\s*Chapter\s+[IVXLCDM\d]+',
+        r'^\s*CHAP\.\s+[IVXLCDM\d]+',
+        r'^[A-Z ,\'\-\.\?!]{10,}$'
+    ]
+    compiled_chapter_patterns = [re.compile(pat) for pat in chapter_header_patterns]
+
+    excluded_keywords = ["play", "scene", "drama"]
+    parsed_books = []
+
+    for fname in sorted(os.listdir(cleaned_dir)):
+        # Tiyatro, drama dosyalarını atla
+        if any(kw in fname.lower() for kw in excluded_keywords):
+            continue
+
+        fpath = os.path.join(cleaned_dir, fname)
+        with open(fpath, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f.readlines() if line.strip()]
+
+        # CHAPTER başlıklarının satır indekslerini bul
+        chapter_indices = [i for i, line in enumerate(lines)
+                           if any(pat.match(line) for pat in compiled_chapter_patterns)]
+
+        ###if not chapter_indices:
+        ###    continue  # CHAPTER başlığı yoksa kitabı atla
+
+        # Giriş kısmı (chapter başlamadan önceki kısım)
+        general_description = "\n".join(lines[:chapter_indices[0]])
+
+        # ❗ Dil kontrolü: sadece İngilizce kitaplar işlenir
+        if "Language: English" not in general_description:
+            continue
+
+        # ❗ Yeni: CHAPTER başlamadan önce CHAPTER kelimesi varsa → başka kitaptan sarkma olabilir
+        ###intro_lines = lines[:chapter_indices[0]]
+        ###if any("CHAPTER" in line.upper() for line in intro_lines):
+        ###    print(f"⚠️ {fname} dosyasının başında başka kitaptan CHAPTER var. Kitap atlandı.")
+        ###    continue
+
+        has_official_chapters = any("CHAPTER" in lines[i].upper() for i in chapter_indices)
+
+        chapters = []
+        for i in range(len(chapter_indices)):
+            start = chapter_indices[i]
+            end = chapter_indices[i + 1] if i + 1 < len(chapter_indices) else len(lines)
+            title = lines[start]
+            body = "\n".join(lines[start + 1:end]).strip()
+
+            if has_official_chapters and "CHAPTER" not in title.upper():
+                continue
+            if not body:
+                continue
+
+            # İlk chapter’ın doğruluğunu kontrol et
+            if i == 0:
+                plain_title = fname.replace("_", " ").replace(".txt", "").lower()
+                plain_body = body[:1000].lower()
+
+                chapter_num = 0
+                roman_match = re.search(r'CHAPTER\s+([IVXLCDM]+)', title.upper())
+                digit_match = re.search(r'CHAPTER\s+(\d+)', title.upper())
+                if roman_match:
+                    chapter_num = roman_to_int(roman_match.group(1))
+                elif digit_match:
+                    chapter_num = int(digit_match.group(1))
+
+                if plain_title.split(";")[0] not in plain_body and chapter_num > 50:
+                    print(f"⚠️ '{fname}' kitabının ilk bölümü atlandı: {title}")
+                    continue
+
+            chapters.append({"title": title, "text": body})
+
+        if not chapters:
+            continue
+
+        parsed_books.append({
+            "book_title": fname.replace(".txt", ""),
+            "general_description": general_description,
+            "chapters": chapters
+        })
+
+    # Aynı numaralı başlıklar varsa kısa olanı at, sahte başlıkları da temizle
+    parsed_books = filter_chapter_variants(parsed_books)
+
+    # JSON'a yaz
+    with open(output_json_path, "w", encoding="utf-8") as json_f:
+        json.dump(parsed_books, json_f, indent=2, ensure_ascii=False)
+
+    print("✅ Kitaplar başarıyla bölümlere ayrıldı ve kaydedildi.")
+
+# 7. Tüm adımları sırasıyla çalıştıran ana fonksiyon
+def main():
+    books_dir = "gutenberg_top30"
+    cleaned_dir = "gutenberg_top30_cleaned_v1"
+    output_json = "gutenberg_parsed_v1.json"
+
+    rename_books(books_dir)                     # 1. Adım: Dosya adlarını düzenle
+    clean_books(books_dir, cleaned_dir)         # 2. Adım: Metinleri temizle
+    check_and_parse_books(cleaned_dir, output_json)  # 3. Adım: JSON varsa geç, yoksa üret
+
+if __name__ == "__main__":
+    main()
+
